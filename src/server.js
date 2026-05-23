@@ -179,10 +179,28 @@ app.get('/api/metrics', (req, res) => {
   }
 });
 
-// POST /api/ingest
-app.post('/api/ingest', (req, res) => {
+// Simple in-memory rate-limiter state
+const rateLimits = new Map();
+setInterval(() => rateLimits.clear(), 60000); // Reset every 1 minute
+
+// POST /api/ingest (Secured & Optimized Ingestion)
+app.post('/api/ingest', express.json({ limit: '10kb' }), async (req, res) => {
+  const ip = req.ip || req.socket.remoteAddress || 'unknown';
+  const hits = rateLimits.get(ip) || 0;
+
+  if (hits >= 100) {
+    return res.status(429).json({ error: 'Too many requests. Limit is 100 per minute.' });
+  }
+  rateLimits.set(ip, hits + 1);
+
+  // Bearer Token Validation
+  const authHeader = req.headers.authorization;
+  if (!authHeader || authHeader !== 'Bearer ollive_secure_ingest_token_2026') {
+    return res.status(401).json({ error: 'Unauthorized. Valid Bearer Token required.' });
+  }
+
   try {
-    const processed = processExternalLog(req.body);
+    const processed = await processExternalLog(req.body);
     res.status(201).json({ status: 'ingested', request_id: processed.request_id });
   } catch (err) {
     console.error('[server] Ingest error:', err.message);

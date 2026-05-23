@@ -1,3 +1,54 @@
+import { Worker } from 'worker_threads';
+import { join, dirname } from 'path';
+import { fileURLToPath } from 'url';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const workerPath = join(__dirname, 'workers', 'redactor-worker.js');
+
+let worker = null;
+const pending = new Map();
+let nextId = 0;
+
+function getWorker() {
+  if (!worker) {
+    worker = new Worker(workerPath);
+    worker.unref();
+    worker.on('message', ({ id, result }) => {
+      const cb = pending.get(id);
+      if (cb) {
+        cb(result);
+        pending.delete(id);
+      }
+    });
+    worker.on('error', (err) => {
+      console.error('[redactor-worker] error:', err);
+      // Fail all pending callbacks
+      for (const cb of pending.values()) {
+        cb({ text: '', detected: [], redacted: false });
+      }
+      pending.clear();
+      worker = null;
+    });
+  }
+  return worker;
+}
+
+export function redactAsync(text) {
+  return new Promise((resolve) => {
+    if (!text || typeof text !== 'string') {
+      return resolve({ text: text ?? '', detected: [], redacted: false });
+    }
+    const id = nextId++;
+    pending.set(id, resolve);
+    try {
+      getWorker().postMessage({ id, text });
+    } catch (err) {
+      console.error('[redactor-worker] failed to post message:', err.message);
+      resolve(redact(text)); // fallback to sync
+    }
+  });
+}
+
 const PATTERNS = [
   {
     name: 'EMAIL',
@@ -54,4 +105,11 @@ export function redact(text) {
     detected,
     redacted: detected.length > 0,
   };
+}
+
+export function closeWorker() {
+  if (worker) {
+    worker.terminate();
+    worker = null;
+  }
 }

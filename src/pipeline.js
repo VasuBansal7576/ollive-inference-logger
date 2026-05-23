@@ -1,7 +1,69 @@
-import { redact } from './redactor.js';
-import { insertLog } from './db.js';
+import { redactAsync } from './redactor.js';
+import { getDb, insertLog } from './db.js';
 
 const VALID_STATUSES = new Set(['pending', 'streaming', 'success', 'error', 'cancelled']);
+const BATCH_SIZE = 20;
+const BATCH_INTERVAL_MS = 1000; // Flush logs every 1s
+
+let batchQueue = [];
+let flushTimeout = null;
+
+/**
+ * Flush all buffered logs in a single SQLite transaction.
+ */
+function flushBatch() {
+  if (flushTimeout) {
+    clearTimeout(flushTimeout);
+    flushTimeout = null;
+  }
+
+  if (batchQueue.length === 0) return;
+
+  const currentBatch = [...batchQueue];
+  batchQueue = [];
+
+  const db = getDb();
+  const insertStmt = db.prepare(`
+    INSERT INTO logs (session_id, request_id, provider, model, status, latency_ms, time_to_first_token_ms,
+      input_tokens, output_tokens, total_tokens, tokens_per_second, cost_estimate,
+      input_preview, output_preview, pii_types_detected, pii_redacted, error_message, error_code)
+    VALUES (@session_id, @request_id, @provider, @model, @status, @latency_ms, @time_to_first_token_ms,
+      @input_tokens, @output_tokens, @total_tokens, @tokens_per_second, @cost_estimate,
+      @input_preview, @output_preview, @pii_types_detected, @pii_redacted, @error_message, @error_code)
+  `);
+
+  const updateSessionTotals = db.prepare(`
+    UPDATE sessions SET total_tokens = total_tokens + ?, total_cost = total_cost + ?, updated_at = datetime('now') WHERE id = ?
+  `);
+
+  try {
+    const batchTransaction = db.transaction((logs) => {
+      for (const log of logs) {
+        insertStmt.run(log);
+        if (log.session_id && log.total_tokens) {
+          updateSessionTotals.run(log.total_tokens || 0, log.cost_estimate || 0, log.session_id);
+        }
+      }
+    });
+
+    batchTransaction(currentBatch);
+  } catch (err) {
+    console.error('[pipeline] Batch database write failed:', err.message);
+  }
+}
+
+/**
+ * Queue a processed log for batched database insertion.
+ */
+function queueLogForBatch(processedLog) {
+  batchQueue.push(processedLog);
+
+  if (batchQueue.length >= BATCH_SIZE) {
+    flushBatch();
+  } else if (!flushTimeout) {
+    flushTimeout = setTimeout(flushBatch, BATCH_INTERVAL_MS);
+  }
+}
 
 /**
  * Validate a raw log entry. Returns null if valid, or an error string.
@@ -20,10 +82,13 @@ function validate(raw) {
 /**
  * Transform a camelCase SDK log into snake_case DB row, apply redaction and enrichment.
  */
-function processLog(raw) {
-  // Redact PII from previews
-  const inputResult = redact(raw.inputPreview || '');
-  const outputResult = redact(raw.outputPreview || '');
+async function processLogAsync(raw) {
+  // Redact PII asynchronously off the main thread
+  const [inputResult, outputResult] = await Promise.all([
+    redactAsync(raw.inputPreview || ''),
+    redactAsync(raw.outputPreview || ''),
+  ]);
+
   const allPiiTypes = [...new Set([...inputResult.detected, ...outputResult.detected])];
 
   // Compute tokens_per_second if missing
@@ -59,34 +124,32 @@ function processLog(raw) {
  */
 export function createPipeline(sdk) {
   sdk.on('log', (rawLog) => {
-    try {
-      const err = validate(rawLog);
-      if (err) {
-        console.warn(`[pipeline] Invalid log skipped: ${err}`, rawLog.requestId);
-        return;
-      }
-
-      const processed = processLog(rawLog);
-
+    // Yield execution to keeping main I/O loop completely free
+    setImmediate(async () => {
       try {
-        insertLog(processed);
-      } catch (dbErr) {
-        console.error(`[pipeline] DB insert failed for ${processed.request_id}:`, dbErr.message);
+        const err = validate(rawLog);
+        if (err) {
+          console.warn(`[pipeline] Invalid log skipped: ${err}`, rawLog.requestId);
+          return;
+        }
+
+        const processed = await processLogAsync(rawLog);
+        queueLogForBatch(processed);
+      } catch (pipelineErr) {
+        console.error('[pipeline] Unexpected error:', pipelineErr.message);
       }
-    } catch (pipelineErr) {
-      console.error('[pipeline] Unexpected error:', pipelineErr.message);
-    }
+    });
   });
 }
 
 /**
- * Process an externally-submitted log (POST /api/ingest).
+ * Process an externally-submitted log asynchronously but write immediately for API sync response (secured via busy_timeout).
  */
-export function processExternalLog(logData) {
+export async function processExternalLog(logData) {
   const err = validate(logData);
   if (err) throw new Error(err);
 
-  const processed = processLog(logData);
+  const processed = await processLogAsync(logData);
 
   try {
     insertLog(processed);

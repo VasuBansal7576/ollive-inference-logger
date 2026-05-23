@@ -14,56 +14,96 @@ db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
 db.pragma('busy_timeout = 5000');
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS sessions (
-    id TEXT PRIMARY KEY,
-    title TEXT,
-    status TEXT DEFAULT 'active' CHECK(status IN ('active','completed','cancelled')),
-    provider TEXT,
-    model TEXT,
-    message_count INTEGER DEFAULT 0,
-    total_tokens INTEGER DEFAULT 0,
-    total_cost REAL DEFAULT 0,
-    created_at TEXT DEFAULT (datetime('now')),
-    updated_at TEXT DEFAULT (datetime('now'))
+const MIGRATIONS = [
+  {
+    version: 1,
+    name: 'initial_schema',
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS sessions (
+          id TEXT PRIMARY KEY,
+          title TEXT,
+          status TEXT DEFAULT 'active' CHECK(status IN ('active','completed','cancelled')),
+          provider TEXT,
+          model TEXT,
+          message_count INTEGER DEFAULT 0,
+          total_tokens INTEGER DEFAULT 0,
+          total_cost REAL DEFAULT 0,
+          created_at TEXT DEFAULT (datetime('now')),
+          updated_at TEXT DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS messages (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          session_id TEXT NOT NULL REFERENCES sessions(id),
+          role TEXT NOT NULL CHECK(role IN ('user','assistant','system')),
+          content TEXT NOT NULL,
+          created_at TEXT DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS logs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          session_id TEXT,
+          request_id TEXT UNIQUE,
+          provider TEXT,
+          model TEXT,
+          status TEXT CHECK(status IN ('pending','streaming','success','error','cancelled')),
+          latency_ms REAL,
+          time_to_first_token_ms REAL,
+          input_tokens INTEGER,
+          output_tokens INTEGER,
+          total_tokens INTEGER,
+          tokens_per_second REAL,
+          cost_estimate REAL,
+          input_preview TEXT,
+          output_preview TEXT,
+          pii_types_detected TEXT,
+          pii_redacted INTEGER DEFAULT 0,
+          error_message TEXT,
+          error_code TEXT,
+          created_at TEXT DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_logs_session ON logs(session_id);
+        CREATE INDEX IF NOT EXISTS idx_logs_status ON logs(status);
+        CREATE INDEX IF NOT EXISTS idx_logs_created ON logs(created_at);
+      `);
+    }
+  }
+];
+
+function runMigrations(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS schema_migrations (
+      version INTEGER PRIMARY KEY,
+      name TEXT NOT NULL,
+      applied_at TEXT DEFAULT (datetime('now'))
+    );
+  `);
+
+  const applied = new Set(
+    db.prepare('SELECT version FROM schema_migrations').all().map(r => r.version)
   );
 
-  CREATE TABLE IF NOT EXISTS messages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id TEXT NOT NULL REFERENCES sessions(id),
-    role TEXT NOT NULL CHECK(role IN ('user','assistant','system')),
-    content TEXT NOT NULL,
-    created_at TEXT DEFAULT (datetime('now'))
-  );
+  for (const m of MIGRATIONS) {
+    if (!applied.has(m.version)) {
+      console.log(`[db] Running schema migration version ${m.version}: ${m.name}`);
+      try {
+        db.transaction(() => {
+          m.up(db);
+          db.prepare('INSERT INTO schema_migrations (version, name) VALUES (?, ?)').run(m.version, m.name);
+        })();
+        console.log(`[db] Schema migration ${m.name} completed successfully.`);
+      } catch (err) {
+        console.error(`[db] Schema migration ${m.name} failed:`, err.message);
+        throw err;
+      }
+    }
+  }
+}
 
-  CREATE TABLE IF NOT EXISTS logs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id TEXT,
-    request_id TEXT UNIQUE,
-    provider TEXT,
-    model TEXT,
-    status TEXT CHECK(status IN ('pending','streaming','success','error','cancelled')),
-    latency_ms REAL,
-    time_to_first_token_ms REAL,
-    input_tokens INTEGER,
-    output_tokens INTEGER,
-    total_tokens INTEGER,
-    tokens_per_second REAL,
-    cost_estimate REAL,
-    input_preview TEXT,
-    output_preview TEXT,
-    pii_types_detected TEXT,
-    pii_redacted INTEGER DEFAULT 0,
-    error_message TEXT,
-    error_code TEXT,
-    created_at TEXT DEFAULT (datetime('now'))
-  );
-
-  CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, created_at);
-  CREATE INDEX IF NOT EXISTS idx_logs_session ON logs(session_id);
-  CREATE INDEX IF NOT EXISTS idx_logs_status ON logs(status);
-  CREATE INDEX IF NOT EXISTS idx_logs_created ON logs(created_at);
-`);
+runMigrations(db);
 
 // Prepared statements
 const stmts = {

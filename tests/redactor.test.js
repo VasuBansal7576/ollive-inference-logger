@@ -1,6 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert';
-import { redact } from '../src/redactor.js';
+import { redact, redactAsync, closeWorker } from '../src/redactor.js';
+
+test.after(() => {
+  closeWorker();
+});
 
 test('PII Redactor — Email Redaction', () => {
   const input = 'My email is john.doe@example.com and secondary is jane@work.co';
@@ -61,4 +65,13 @@ test('PII Redactor — No PII', () => {
   assert.strictEqual(result.redacted, false);
   assert.deepStrictEqual(result.detected, []);
   assert.strictEqual(result.text, input);
+});
+
+test('PII Redactor — Async Worker Thread Redaction', async () => {
+  const input = 'Send the key gsk_yH7bN28vLxJkPqMw92nB10sD82fT to bob@company.org';
+  const result = await redactAsync(input);
+
+  assert.strictEqual(result.redacted, true);
+  assert.deepStrictEqual(result.detected.sort(), ['API_KEY', 'EMAIL'].sort());
+  assert.strictEqual(result.text, 'Send the key [API_KEY_REDACTED] to [EMAIL_REDACTED]');
 });
