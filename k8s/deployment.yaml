@@ -1,0 +1,72 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ollive-inference-logger
+  labels:
+    app: ollive-inference-logger
+spec:
+  replicas: 1  # SYSTEMS INSIGHT: Maintained at 1 for SQLite single-node write safety in K8s. Scaling to 2+ requires PG/Timescale DB mapping.
+  strategy:
+    type: Recreate  # Ensures the old pod terminates completely before the new one starts, avoiding SQLite WAL locking.
+  selector:
+    matchLabels:
+      app: ollive-inference-logger
+  template:
+    metadata:
+      labels:
+        app: ollive-inference-logger
+    spec:
+      containers:
+        - name: app
+          image: ollive-inference-logger:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 3000
+          env:
+            - name: PORT
+              value: "3000"
+            # Optional secrets should be injected via 'kubectl create secret generic ollive-secrets'
+            - name: GROQ_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ollive-secrets
+                  key: groq-api-key
+                  optional: true
+            - name: GEMINI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ollive-secrets
+                  key: gemini-api-key
+                  optional: true
+            - name: OPENROUTER_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ollive-secrets
+                  key: openrouter-api-key
+                  optional: true
+          resources:
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          volumeMounts:
+            - name: db-volume
+              mountPath: /app/data
+      volumes:
+        - name: db-volume
+          persistentVolumeClaim:
+            claimName: ollive-db-pvc
