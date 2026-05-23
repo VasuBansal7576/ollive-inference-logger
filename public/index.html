@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Ollive — Production-grade LLM inference logging, observability, and analytics dashboard with real-time streaming.">
+  <meta name="theme-color" content="#0a0a14">
+  <meta name="robots" content="index, follow">
+  <meta property="og:title" content="Ollive — LLM Inference Logger">
+  <meta property="og:description" content="Real-time LLM observability. Log every call, track latency, monitor cost, and redact PII — all in one dashboard.">
+  <meta property="og:type" content="website">
+  <title>Ollive — LLM Inference Logger</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- ═══════════════════════════ HEADER ═══════════════════════════ -->
+  <header id="app-header">
+    <div class="header-left">
+      <button id="sidebar-toggle" class="icon-btn" aria-label="Toggle sessions panel">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+      </button>
+      <div class="brand">
+        <h1 class="brand-name">
+          <svg class="brand-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+          Ollive
+        </h1>
+        <span class="brand-subtitle">Inference Logger</span>
+      </div>
+    </div>
+    <div class="header-right">
+      <div id="connection-status" class="status-indicator" title="API Status">
+        <span class="status-dot status-dot--success"></span>
+        <span class="status-label">Connected</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- ═══════════════════════════ MAIN LAYOUT ═══════════════════════════ -->
+  <main id="app-layout">
+
+    <!-- ────────── SESSIONS PANEL (LEFT) ────────── -->
+    <aside id="sessions-panel" class="panel">
+      <div class="panel-header">
+        <button id="new-chat-btn" class="btn btn--primary btn--full">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          New Chat
+        </button>
+      </div>
+      <div class="panel-section-label">Conversations</div>
+      <div id="sessions-list" class="sessions-list">
+        <!-- Session cards render here -->
+        <div id="sessions-empty" class="empty-state">
+          <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
+          <p>No conversations yet.</p>
+          <span>Start a new chat!</span>
+        </div>
+      </div>
+      <div class="panel-footer">
+        <span id="sessions-stats" class="stats-label">0 calls · 0 tokens</span>
+      </div>
+    </aside>
+
+    <!-- ────────── CHAT PANEL (CENTER) ────────── -->
+    <section id="chat-panel" class="panel">
+      <!-- Provider bar -->
+      <div id="provider-bar" class="provider-bar">
+        <div class="provider-selectors">
+          <div class="select-group">
+            <label for="provider-select">Provider</label>
+            <select id="provider-select"></select>
+          </div>
+          <div class="select-group">
+            <label for="model-select">Model</label>
+            <select id="model-select"></select>
+          </div>
+        </div>
+        <div id="pii-badge" class="pii-badge hidden" title="PII was redacted from this conversation">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
+          PII Shield
+        </div>
+      </div>
+
+      <!-- Messages -->
+      <div id="messages-area" class="messages-area">
+        <div id="chat-empty" class="empty-state empty-state--chat">
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 01-.9 3.8 8.5 8.5 0 01-7.6 4.7 8.38 8.38 0 01-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 01-.9-3.8 8.5 8.5 0 014.7-7.6 8.38 8.38 0 013.8-.9h.5a8.48 8.48 0 018 8v.5z"/></svg>
+          <p>Every call is logged and observable</p>
+          <span>Select a conversation or start a new one</span>
+        </div>
+      </div>
+
+      <!-- Input -->
+      <div id="input-area" class="input-area">
+        <div class="input-wrapper">
+          <textarea id="message-input" placeholder="Message… (Enter to send, Shift+Enter for newline)" rows="1"></textarea>
+          <div class="input-actions">
+            <button id="cancel-btn" class="btn btn--danger btn--icon hidden" title="Cancel streaming">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
+            <button id="send-btn" class="btn btn--primary btn--icon" title="Send message">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ────────── METRICS PANEL (RIGHT) ────────── -->
+    <aside id="metrics-panel" class="panel">
+      <div class="panel-header metrics-header">
+        <h2 class="panel-title">Analytics</h2>
+        <div id="metrics-refresh" class="refresh-indicator" title="Auto-refreshing every 5s">
+          <span class="refresh-dot"></span>
+          Live
+        </div>
+      </div>
+
+      <div id="metrics-content" class="metrics-content">
+        <!-- Stat cards -->
+        <div class="stats-grid">
+          <div class="stat-card" id="stat-total-calls">
+            <span class="stat-value" data-value="0">0</span>
+            <span class="stat-label">Total Calls</span>
+          </div>
+          <div class="stat-card" id="stat-total-tokens">
+            <span class="stat-value" data-value="0">0</span>
+            <span class="stat-label">Total Tokens</span>
+          </div>
+          <div class="stat-card" id="stat-latency-p50">
+            <span class="stat-value" data-value="0">—</span>
+            <span class="stat-label">Latency p50</span>
+          </div>
+          <div class="stat-card" id="stat-error-rate">
+            <span class="stat-value stat-value--success" data-value="0">0%</span>
+            <span class="stat-label">Error Rate</span>
+          </div>
+        </div>
+
+        <!-- Provider breakdown -->
+        <div class="metrics-section">
+          <h3 class="metrics-section-title">Provider Breakdown</h3>
+          <div id="provider-bars" class="provider-bars">
+            <div class="empty-state empty-state--small">No data yet</div>
+          </div>
+        </div>
+
+        <!-- Cost estimate -->
+        <div class="metrics-section">
+          <h3 class="metrics-section-title">Cost Estimate</h3>
+          <div id="cost-display" class="cost-display">
+            <span class="cost-value">$0.00</span>
+          </div>
+        </div>
+
+        <!-- Recent Logs -->
+        <div class="metrics-section">
+          <h3 class="metrics-section-title">Recent Logs</h3>
+          <div id="recent-logs" class="recent-logs">
+            <div id="metrics-empty" class="empty-state empty-state--small">
+              <p>No data yet.</p>
+              <span>Start chatting to see analytics.</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
