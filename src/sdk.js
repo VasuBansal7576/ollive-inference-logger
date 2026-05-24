@@ -89,11 +89,12 @@ export class LLMSdk extends EventEmitter {
    * @yields {{ type: 'delta'|'done'|'error', content?: string, usage?: object }}
    */
   async *chat(provider, model, messages, sessionId, abortSignal) {
-    const cfg = this.providers[provider];
-    if (!cfg) throw new Error(`Provider "${provider}" is not configured`);
+    let currentProvider = provider;
+    let resolvedModel = model;
+    let cfg = this.providers[currentProvider];
+    if (!cfg) throw new Error(`Provider "${currentProvider}" is not configured`);
 
     const requestId = uuidv4();
-    const resolvedModel = model || cfg.defaultModel;
     const startTime = Date.now();
     let firstTokenTime = null;
     let outputText = '';
@@ -104,34 +105,125 @@ export class LLMSdk extends EventEmitter {
     const lastUserMsg = [...messages].reverse().find(m => m.role === 'user');
     const inputPreview = lastUserMsg?.content?.slice(0, 200) || '';
 
-    // Select the right provider adapter
+    // If Groq is the primary provider, enable transparent fallback to Gemini
+    let tryFallback = (currentProvider === 'groq' && this.providers.gemini);
+
+    resolvedModel = resolvedModel || cfg.defaultModel;
+
+    // Helper to get adapter stream
+    const getStream = (p, m, config) => {
+      if (config.type === 'openai-compat') {
+        return openaiCompat.streamChat(config.baseUrl, config.apiKey, m, messages, abortSignal);
+      } else if (config.type === 'gemini') {
+        return gemini.streamChat(config.apiKey, m, messages, abortSignal);
+      } else if (config.type === 'demo') {
+        return this.streamDemoChat(m, messages, abortSignal);
+      } else {
+        throw new Error(`Unknown provider type: ${config.type}`);
+      }
+    };
+
     let stream;
-    if (cfg.type === 'openai-compat') {
-      stream = openaiCompat.streamChat(cfg.baseUrl, cfg.apiKey, resolvedModel, messages, abortSignal);
-    } else if (cfg.type === 'gemini') {
-      stream = gemini.streamChat(cfg.apiKey, resolvedModel, messages, abortSignal);
-    } else if (cfg.type === 'demo') {
-      stream = this.streamDemoChat(resolvedModel, messages, abortSignal);
-    } else {
-      throw new Error(`Unknown provider type: ${cfg.type}`);
+    try {
+      stream = getStream(currentProvider, resolvedModel, cfg);
+    } catch (err) {
+      if (tryFallback) {
+        console.warn(`[sdk] Failed to initialize ${currentProvider} stream: ${err.message}. Falling back to gemini.`);
+        currentProvider = 'gemini';
+        cfg = this.providers.gemini;
+        resolvedModel = cfg.defaultModel;
+        tryFallback = false;
+        try {
+          stream = getStream(currentProvider, resolvedModel, cfg);
+        } catch (fallbackErr) {
+          errorOccurred = { type: 'error', message: fallbackErr.message };
+        }
+      } else {
+        errorOccurred = { type: 'error', message: err.message };
+      }
     }
 
-    try {
-      for await (const chunk of stream) {
-        if (chunk.type === 'delta') {
-          if (firstTokenTime === null) firstTokenTime = Date.now();
-          outputText += chunk.content;
-          yield chunk;
-        } else if (chunk.type === 'done') {
-          finalUsage = chunk.usage;
-          yield chunk;
-        } else if (chunk.type === 'error') {
-          errorOccurred = chunk;
-          yield chunk;
+    if (stream && !errorOccurred) {
+      try {
+        for await (const chunk of stream) {
+          if (chunk.type === 'delta') {
+            if (firstTokenTime === null) firstTokenTime = Date.now();
+            outputText += chunk.content;
+            yield chunk;
+          } else if (chunk.type === 'done') {
+            finalUsage = chunk.usage;
+            yield chunk;
+          } else if (chunk.type === 'error') {
+            // If main provider stream yields an error before returning any tokens, try falling back
+            if (tryFallback && firstTokenTime === null) {
+              console.warn(`[sdk] ${currentProvider} stream yielded error before first token: ${chunk.message}. Falling back to gemini.`);
+              currentProvider = 'gemini';
+              cfg = this.providers.gemini;
+              resolvedModel = cfg.defaultModel;
+              tryFallback = false;
+              
+              // Start the fallback stream
+              let fallbackStream;
+              try {
+                fallbackStream = getStream(currentProvider, resolvedModel, cfg);
+                for await (const fbChunk of fallbackStream) {
+                  if (fbChunk.type === 'delta') {
+                    if (firstTokenTime === null) firstTokenTime = Date.now();
+                    outputText += fbChunk.content;
+                    yield fbChunk;
+                  } else if (fbChunk.type === 'done') {
+                    finalUsage = fbChunk.usage;
+                    yield fbChunk;
+                  } else if (fbChunk.type === 'error') {
+                    errorOccurred = fbChunk;
+                    yield fbChunk;
+                  }
+                }
+              } catch (fbErr) {
+                errorOccurred = { type: 'error', message: fbErr.message };
+                yield errorOccurred;
+              }
+              break; // Break the main stream loop
+            } else {
+              errorOccurred = chunk;
+              yield chunk;
+            }
+          }
+        }
+      } catch (err) {
+        if (tryFallback && firstTokenTime === null) {
+          console.warn(`[sdk] Caught error in ${currentProvider} stream before first token: ${err.message}. Falling back to gemini.`);
+          currentProvider = 'gemini';
+          cfg = this.providers.gemini;
+          resolvedModel = cfg.defaultModel;
+          tryFallback = false;
+
+          let fallbackStream;
+          try {
+            fallbackStream = getStream(currentProvider, resolvedModel, cfg);
+            for await (const fbChunk of fallbackStream) {
+              if (fbChunk.type === 'delta') {
+                if (firstTokenTime === null) firstTokenTime = Date.now();
+                outputText += fbChunk.content;
+                yield fbChunk;
+              } else if (fbChunk.type === 'done') {
+                finalUsage = fbChunk.usage;
+                yield fbChunk;
+              } else if (fbChunk.type === 'error') {
+                errorOccurred = fbChunk;
+                yield fbChunk;
+              }
+            }
+          } catch (fbErr) {
+            errorOccurred = { type: 'error', message: fbErr.message };
+            yield errorOccurred;
+          }
+        } else {
+          errorOccurred = { type: 'error', message: err.message };
+          yield errorOccurred;
         }
       }
-    } catch (err) {
-      errorOccurred = { type: 'error', message: err.message };
+    } else if (errorOccurred) {
       yield errorOccurred;
     }
 
@@ -140,7 +232,7 @@ export class LLMSdk extends EventEmitter {
     const ttft = firstTokenTime ? firstTokenTime - startTime : null;
     const usage = finalUsage || { input_tokens: 0, output_tokens: 0, total_tokens: 0 };
     const tps = latencyMs > 0 ? (usage.output_tokens / (latencyMs / 1000)) : 0;
-    const cost = estimateCost(provider, usage.input_tokens, usage.output_tokens);
+    const cost = estimateCost(currentProvider, usage.input_tokens, usage.output_tokens);
 
     const isCancelled = !!(
       abortSignal?.aborted ||
@@ -154,7 +246,7 @@ export class LLMSdk extends EventEmitter {
     const logEntry = {
       requestId,
       sessionId,
-      provider,
+      provider: currentProvider,
       model: resolvedModel,
       status: isCancelled ? 'cancelled' : (errorOccurred ? 'error' : 'success'),
       latencyMs,
