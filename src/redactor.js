@@ -29,6 +29,17 @@ function getWorker() {
       pending.clear();
       worker = null;
     });
+    worker.on('exit', (code) => {
+      if (code !== 0 && worker !== null) {
+        console.error(`[redactor-worker] exited unexpectedly with code ${code}`);
+      }
+      // Fail all remaining pending callbacks to prevent hangs
+      for (const cb of pending.values()) {
+        cb({ text: '', detected: [], redacted: false });
+      }
+      pending.clear();
+      worker = null;
+    });
   }
   return worker;
 }
@@ -56,11 +67,6 @@ const PATTERNS = [
     replacement: '[EMAIL_REDACTED]',
   },
   {
-    name: 'PHONE',
-    regex: /(\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}/g,
-    replacement: '[PHONE_REDACTED]',
-  },
-  {
     name: 'SSN',
     regex: /\b\d{3}[-\s]?\d{2}[-\s]?\d{4}\b/g,
     replacement: '[SSN_REDACTED]',
@@ -69,6 +75,11 @@ const PATTERNS = [
     name: 'CREDIT_CARD',
     regex: /\b(?:\d{4}[-\s]?){3}\d{4}\b/g,
     replacement: '[CC_REDACTED]',
+  },
+  {
+    name: 'PHONE',
+    regex: /(\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}/g,
+    replacement: '[PHONE_REDACTED]',
   },
   {
     name: 'API_KEY',

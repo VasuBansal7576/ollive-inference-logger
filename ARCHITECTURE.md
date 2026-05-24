@@ -1,10 +1,12 @@
 # Ollive Observability Platform Architecture
 
-This document provides a deep-dive architectural review of the Ollive LLM Inference Ingestion and Observability System. It covers data flow, design decisions, scaling, and recovery strategies required for a production-grade deployment at 10M+ daily requests.
+This document provides a technical overview of the Ollive LLM inference ingestion and observability system. It covers data flow, database transaction boundaries, concurrency management, and the horizontal scaling roadmap for high-throughput deployments.
 
 ---
 
-## 🗺 System Ingest & Ingestion Pipeline Flow
+## Telemetry Ingestion and Pipeline Flow
+
+The sequence diagram below illustrates the decoupled lifecycle of a chat request and its corresponding telemetry logging:
 
 ```mermaid
 sequenceDiagram
@@ -48,62 +50,60 @@ sequenceDiagram
 
 ---
 
-## 🏛 Telemetry Event Lifecycle
+## Telemetry Event Lifecycle
 
-The telemetry ingestion lifecycle follows a strictly ordered, multi-phased pipeline designed to guarantee **safety, isolation, and accuracy** before persistent storage:
+The telemetry ingestion process handles incoming log validation, compliance sanitization, and database updates in discrete, isolated steps to keep the main server responsive:
 
 ```
 [SDK Log Event]
       │
       ▼
 ┌──────────────┐
-│  Validation  │ ──(Reject malformed fields / incorrect enum status)──► [Discard & Log Warning]
+│  Validation  │ ──(Discard and log warning if required fields are missing)
 └──────────────┘
       │
       ▼
 ┌──────────────┐
-│ PII Redactor │ ──(Scan Email, Phone, SSN, API Key, Credit Cards)──► [Replace with Redacted Tokens]
+│ PII Redactor │ ──(Scan emails, phones, SSNs, CCs, API keys via background worker pool)
 └──────────────┘
       │
       ▼
 ┌──────────────┐
-│ Enrichment   │ ──(Calculate Throughput (TPS), Estimate Cost)
+│ Enrichment   │ ──(Calculate output tokens/sec and lookup cost models)
 └──────────────┘
       │
       ▼
 ┌──────────────┐
-│  Ingestion   │ ──(Write log row & atomic increment on sessions)──► [SQLite WAL DB]
+│  Ingestion   │ ──(Write log row and update session counters in a transaction)
 └──────────────┘
 ```
 
 ---
 
-## 🚀 Scaling Ollive to 10M+ Daily Logs (Production Roadmap)
+## Production Scaling Roadmap
 
-To move this system from a highly concurrent local environment to an enterprise production footprint, the following architectural upgrades are recommended:
+To scale this architecture from a single-node local runtime to an enterprise distributed environment (10M+ daily transactions), we recommend the following migrations:
 
-### 1. Ingestion Layer: Swap Event-Emitter for Redis Streams
-* **Current:** Decoupled via Node's memory-based `EventEmitter`. This is single-process and vulnerable to data loss if the process crashes before writing to the database.
-* **Production:** Publish SDK logs to a **Redis Stream** or **Apache Kafka** cluster. Redis Streams provide high-throughput, low-latency queues with consumer groups, enabling horizontal scaling of pipeline ingestion worker processes independently of the main API servers.
+### Ingestion Queue: EventEmitter to Redis Streams / Kafka
+* **Current:** Node's internal `EventEmitter` manages the asynchronous log handoff. This is process-bound; if the server crashes or restarts, any log in the in-memory queue is lost.
+* **Production:** Publish log events to a **Redis Stream** or a **Kafka** topic. This decouples ingestion horizontally, letting you scale ingestion workers independently of the Express web pods while ensuring durable message queueing.
 
-### 2. Storage Layer: SQLite to TimescaleDB / PostgreSQL
-* **Current:** SQLite `WAL` mode.
-* **Production:** Deploy **TimescaleDB** (a PostgreSQL extension for time-series data). Log tables are partitioned into time-based chunks (hypertables), allowing extremely fast queries over rolling intervals and automatic retention roll-offs.
+### Database: SQLite WAL to PostgreSQL / TimescaleDB
+* **Current:** Local SQLite database in Write-Ahead Logging (WAL) mode.
+* **Production:** Migrate to **TimescaleDB** or **PostgreSQL** read-replicas. TimescaleDB partitions the telemetry logs by time intervals (hypertables), maintaining high write throughput and allowing automatic database retention roll-offs without table locks.
 
-### 3. Metric Aggregation: Rollups & HyperLogLog
-* **Current:** P50/P95 latencies are calculated on-the-fly using offset sorting over raw log rows.
-* **Production:** For millions of logs, on-the-fly percentile calculations become slow. Use:
-  1. **Continuous Aggregations** (TimescaleDB) to automatically pre-compute p50, p95, and error rates every 1 minute.
-  2. **HyperLogLog** (Redis or Postgres) for fast, approximate unique counts (e.g. active users, unique session distributions).
+### Aggregations: Pre-Computed Rollups
+* **Current:** Percentile latencies (P50/P95) are calculated on-the-fly directly from the raw log rows in SQLite.
+* **Production:** For massive datasets, on-the-fly sorting becomes slow. Configure **Continuous Aggregations** in TimescaleDB to pre-compute percentiles and error metrics on a rolling 1-minute interval, serving the dashboard instantly.
 
-### 4. Backpressure & Buffered Writes
-* **Current:** Every log event executes a direct database write.
-* **Production:** Buffer logs in-memory (or in Redis) and perform **bulk inserts** (e.g., 500 logs per insert or every 100ms). This drastically reduces disk I/O bottlenecks and increases throughput by up to 20x.
+### Backpressure Control
+* **Current:** The pipeline buffers log entries in memory and flushes them to SQLite in transactions when reaching the batch size limit or after a 1-second timeout.
+* **Production:** Maintain this batch-transaction pattern on the ingestion workers, scaling the queue size and using a distributed cache (like Redis) as a buffer layer to protect the primary database from write spikes.
 
 ---
 
-## 🛡 Failure Handling, Redundancy & Alerts
+## Failure Handling, Redundancy, & Recovery
 
-* **SDK Circuit Breaking:** If an external LLM provider goes down (or hits a rate limit), the SDK automatically intercepts the `503` or `429` status code, yields an `error` chunk to keep the client informed, logs the failure to the DB, and can trigger automatic fallback to another active provider.
-* **Database Write Failures:** The Ingestion pipeline catches SQLite write exceptions. In a distributed setup, failed writes are published to a Dead Letter Queue (DLQ) in Redis/Kafka for manual replay or retry, preventing loss of auditing data.
-* **Ingestion Graceful Degradation:** If the database becomes unresponsive, the ingestion pipeline can temporarily buffer log records in Redis until the database returns online.
+* **SDK Circuit Breaking:** If an external LLM API goes down or returns a rate-limit code (429/503), the SDK intercepts the exception, yields an error chunk to the client, writes the failure event to the logs, and routes subsequent requests to a configured fallback provider.
+* **Ingestion Dead-Letter Queues (DLQ):** If the primary database is locked or unavailable, the ingestion worker catches the write error and publishes the failed log block to a Dead-Letter Queue (DLQ) in Redis or Kafka for automated retries once the database is back online.
+* **Graceful Shutdown Guards:** The web server hooks into process signals (`SIGTERM`/`SIGINT`). When triggered, it terminates worker threads, runs a final synchronous flush of the batch queue to SQLite, and closes the database connection cleanly to prevent database corruption or telemetry gaps.

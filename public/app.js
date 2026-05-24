@@ -48,10 +48,20 @@ function cacheDom() {
 }
 
 // ─── Helpers ───
-function createElement(tag, className, innerHTML) {
+function escapeHtml(text) {
+  if (text == null) return '';
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+function createElement(tag, className, textContent) {
   const el = document.createElement(tag);
   if (className) el.className = className;
-  if (innerHTML) el.innerHTML = innerHTML;
+  if (textContent) el.textContent = textContent;
   return el;
 }
 
@@ -93,10 +103,14 @@ function autoResizeTextarea(textarea) {
 }
 
 // ─── API ───
+const ADMIN_TOKEN = new URLSearchParams(window.location.search).get('token') || '';
+
 const API = {
   async get(path) {
     try {
-      const res = await fetch(path);
+      const res = await fetch(path, {
+        headers: { 'Authorization': `Bearer ${ADMIN_TOKEN}` }
+      });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       return await res.json();
     } catch (err) {
@@ -108,7 +122,10 @@ const API = {
     try {
       const res = await fetch(path, {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${ADMIN_TOKEN}`
+        },
         body: JSON.stringify(body),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -186,6 +203,9 @@ function renderSessions() {
   sorted.forEach(session => {
     const card = createElement('div', `session-card${session.id === state.currentSessionId ? ' session-card--active' : ''}`);
     card.dataset.sessionId = session.id;
+    card.setAttribute('tabindex', '0');
+    card.setAttribute('role', 'button');
+    card.setAttribute('aria-label', `Chat session: ${session.title || 'Untitled Chat'}`);
 
     const statusClass = session.status === 'active' ? 'status-dot--success status-dot--pulse'
       : session.status === 'cancelled' ? 'status-dot--error'
@@ -194,15 +214,21 @@ function renderSessions() {
     card.innerHTML = `
       <span class="status-dot ${statusClass}"></span>
       <div class="session-card-body">
-        <div class="session-card-title">${truncate(session.title || 'Untitled Chat')}</div>
+        <div class="session-card-title">${escapeHtml(truncate(session.title || 'Untitled Chat'))}</div>
         <div class="session-card-meta">
-          ${session.provider ? `<span class="session-card-badge">${session.provider}</span>` : ''}
+          ${session.provider ? `<span class="session-card-badge">${escapeHtml(session.provider)}</span>` : ''}
           <span>${formatTime(session.updated_at || session.created_at)}</span>
         </div>
       </div>
     `;
 
     card.addEventListener('click', () => selectSession(session.id));
+    card.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        selectSession(session.id);
+      }
+    });
     dom.sessionsList.insertBefore(card, dom.sessionsEmpty);
   });
 
@@ -478,7 +504,7 @@ async function sendMessage() {
 
     if (err.name !== 'AbortError') {
       const errorEl = createElement('div', 'message message--error');
-      errorEl.innerHTML = `<div class="message-bubble">⚠ ${err.message || 'An error occurred'}</div>`;
+      errorEl.innerHTML = `<div class="message-bubble">⚠ ${escapeHtml(err.message || 'An error occurred')}</div>`;
       dom.messagesArea.appendChild(errorEl);
       scrollToBottom(dom.messagesArea);
     }
@@ -585,7 +611,7 @@ function renderProviderBars(breakdown) {
     const item = createElement('div', 'provider-bar-item');
     item.innerHTML = `
       <div class="provider-bar-header">
-        <span class="provider-bar-name">${name}</span>
+        <span class="provider-bar-name">${escapeHtml(name)}</span>
         <span class="provider-bar-value">${formatNumber(calls)} calls</span>
       </div>
       <div class="provider-bar-track">
@@ -612,7 +638,7 @@ function renderRecentLogs(logs) {
     const statusCls = log.status === 'error' ? 'log-status--error' : 'log-status--success';
     row.innerHTML = `
       <span class="log-status ${statusCls}"></span>
-      <span class="log-provider">${log.provider || '—'}</span>
+      <span class="log-provider">${escapeHtml(log.provider || '—')}</span>
       <span class="log-latency">${formatLatency(log.latency || log.latency_ms)}</span>
       <span class="log-tokens">${formatNumber(log.tokens || log.total_tokens || 0)} tok</span>
     `;

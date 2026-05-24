@@ -42,7 +42,7 @@
   <main id="app-layout">
 
     <!-- ────────── SESSIONS PANEL (LEFT) ────────── -->
-    <aside id="sessions-panel" class="panel">
+    <aside id="sessions-panel" class="panel" aria-label="Conversations Panel">
       <div class="panel-header">
         <button id="new-chat-btn" class="btn btn--primary btn--full">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
@@ -95,12 +95,12 @@
       <!-- Input -->
       <div id="input-area" class="input-area">
         <div class="input-wrapper">
-          <textarea id="message-input" placeholder="Message… (Enter to send, Shift+Enter for newline)" rows="1"></textarea>
+          <textarea id="message-input" placeholder="Message… (Enter to send, Shift+Enter for newline)" rows="1" aria-label="Chat Message Input"></textarea>
           <div class="input-actions">
-            <button id="cancel-btn" class="btn btn--danger btn--icon hidden" title="Cancel streaming">
+            <button id="cancel-btn" class="btn btn--danger btn--icon hidden" title="Cancel streaming" aria-label="Cancel streaming">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
             </button>
-            <button id="send-btn" class="btn btn--primary btn--icon" title="Send message">
+            <button id="send-btn" class="btn btn--primary btn--icon" title="Send message" aria-label="Send message">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
             </button>
           </div>
@@ -109,7 +109,7 @@
     </section>
 
     <!-- ────────── METRICS PANEL (RIGHT) ────────── -->
-    <aside id="metrics-panel" class="panel">
+    <aside id="metrics-panel" class="panel" aria-label="Analytics Panel">
       <div class="panel-header metrics-header">
         <h2 class="panel-title">Analytics</h2>
         <div id="metrics-refresh" class="refresh-indicator" title="Auto-refreshing every 5s">

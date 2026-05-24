@@ -1,35 +1,62 @@
 /**
  * Compute analytics from the logs table.
+ * All statements are pre-compiled at init for performance.
  */
-export function getMetrics(db) {
-  const summary = db.prepare(`
-    SELECT
-      (SELECT COUNT(*) FROM sessions) AS total_sessions,
-      (SELECT SUM(message_count) FROM sessions) AS total_messages,
-      (SELECT COUNT(*) FROM logs) AS total_logs,
-      (SELECT COALESCE(SUM(total_tokens), 0) FROM logs) AS total_tokens,
-      (SELECT COALESCE(SUM(cost_estimate), 0) FROM logs) AS total_cost,
-      (SELECT ROUND(AVG(latency_ms), 2) FROM logs WHERE status = 'success') AS avg_latency_ms
-  `).get();
 
-  const errorStats = db.prepare(`
-    SELECT COUNT(*) AS total FROM logs WHERE status = 'error'
-  `).get();
+const dbStmtsCache = new WeakMap();
+
+function getStmts(db) {
+  if (dbStmtsCache.has(db)) return dbStmtsCache.get(db);
+
+  const stmts = {
+    summary: db.prepare(`
+      SELECT
+        (SELECT COUNT(*) FROM sessions) AS total_sessions,
+        (SELECT SUM(message_count) FROM sessions) AS total_messages,
+        (SELECT COUNT(*) FROM logs) AS total_logs,
+        (SELECT COALESCE(SUM(total_tokens), 0) FROM logs) AS total_tokens,
+        (SELECT COALESCE(SUM(cost_estimate), 0) FROM logs) AS total_cost,
+        (SELECT ROUND(AVG(latency_ms), 2) FROM logs WHERE status = 'success') AS avg_latency_ms
+    `),
+    errorCount: db.prepare(`SELECT COUNT(*) AS total FROM logs WHERE status = 'error'`),
+    latencyAll: db.prepare(`SELECT latency_ms FROM logs WHERE status = 'success' AND latency_ms IS NOT NULL ORDER BY latency_ms ASC`),
+    distinctProviders: db.prepare(`SELECT DISTINCT provider FROM logs WHERE provider IS NOT NULL`),
+    latencyByProvider: db.prepare(`SELECT latency_ms FROM logs WHERE status = 'success' AND provider = ? AND latency_ms IS NOT NULL ORDER BY latency_ms ASC`),
+    avgTps: db.prepare(`SELECT ROUND(AVG(tokens_per_second), 2) AS avg_tps FROM logs WHERE status = 'success' AND tokens_per_second > 0`),
+    tpsByProvider: db.prepare(`SELECT ROUND(AVG(tokens_per_second), 2) AS avg_tps FROM logs WHERE status = 'success' AND provider = ? AND tokens_per_second > 0`),
+    recentErrors: db.prepare(`SELECT error_message, provider, created_at FROM logs WHERE status = 'error' ORDER BY created_at DESC LIMIT 10`),
+    recentLogs: db.prepare(`
+      SELECT request_id, session_id, provider, model, status, latency_ms, time_to_first_token_ms,
+             total_tokens, tokens_per_second, cost_estimate, pii_redacted, created_at
+      FROM logs ORDER BY created_at DESC LIMIT 20
+    `),
+    piiTotal: db.prepare(`SELECT COUNT(*) AS cnt FROM logs WHERE pii_redacted = 1`),
+    piiTypes: db.prepare(`SELECT pii_types_detected FROM logs WHERE pii_types_detected IS NOT NULL`),
+    providerCalls: db.prepare(`SELECT provider, COUNT(*) as calls FROM logs WHERE provider IS NOT NULL GROUP BY provider`),
+  };
+
+  dbStmtsCache.set(db, stmts);
+  return stmts;
+}
+
+function percentile(rows, p) {
+  if (rows.length === 0) return 0;
+  const idx = Math.max(0, Math.ceil(rows.length * p / 100) - 1);
+  return Math.round(rows[idx].latency_ms * 100) / 100;
+}
+
+export function getMetrics(db) {
+  const s = getStmts(db);
+
+  const summary = s.summary.get();
+  const errorStats = s.errorCount.get();
 
   const totalLogs = summary.total_logs || 1;
   summary.error_rate = Math.round((errorStats.total / totalLogs) * 10000) / 100;
   summary.total_messages = summary.total_messages || 0;
 
   // Latency percentiles (global)
-  const latencyRows = db.prepare(`
-    SELECT latency_ms FROM logs WHERE status = 'success' AND latency_ms IS NOT NULL ORDER BY latency_ms ASC
-  `).all();
-
-  const percentile = (rows, p) => {
-    if (rows.length === 0) return 0;
-    const idx = Math.max(0, Math.ceil(rows.length * p / 100) - 1);
-    return Math.round(rows[idx].latency_ms * 100) / 100;
-  };
+  const latencyRows = s.latencyAll.all();
 
   const latency = {
     p50_ms: percentile(latencyRows, 50),
@@ -38,11 +65,9 @@ export function getMetrics(db) {
   };
 
   // Per-provider latency
-  const providers = db.prepare(`SELECT DISTINCT provider FROM logs WHERE provider IS NOT NULL`).all();
+  const providers = s.distinctProviders.all();
   for (const { provider } of providers) {
-    const pRows = db.prepare(`
-      SELECT latency_ms FROM logs WHERE status = 'success' AND provider = ? AND latency_ms IS NOT NULL ORDER BY latency_ms ASC
-    `).all(provider);
+    const pRows = s.latencyByProvider.all(provider);
     latency.by_provider[provider] = {
       p50: percentile(pRows, 50),
       p95: percentile(pRows, 95),
@@ -50,27 +75,19 @@ export function getMetrics(db) {
   }
 
   // Throughput
-  const avgTps = db.prepare(`
-    SELECT ROUND(AVG(tokens_per_second), 2) AS avg_tps FROM logs WHERE status = 'success' AND tokens_per_second > 0
-  `).get();
-
+  const avgTps = s.avgTps.get();
   const throughput = {
     avg_tokens_per_second: avgTps?.avg_tps || 0,
     by_provider: {},
   };
 
   for (const { provider } of providers) {
-    const pTps = db.prepare(`
-      SELECT ROUND(AVG(tokens_per_second), 2) AS avg_tps FROM logs WHERE status = 'success' AND provider = ? AND tokens_per_second > 0
-    `).get(provider);
+    const pTps = s.tpsByProvider.get(provider);
     throughput.by_provider[provider] = { avg_tokens_per_second: pTps?.avg_tps || 0 };
   }
 
   // Errors
-  const recentErrors = db.prepare(`
-    SELECT error_message, provider, created_at FROM logs WHERE status = 'error' ORDER BY created_at DESC LIMIT 10
-  `).all();
-
+  const recentErrors = s.recentErrors.all();
   const errors = {
     total: errorStats.total,
     rate: summary.error_rate,
@@ -78,15 +95,11 @@ export function getMetrics(db) {
   };
 
   // Recent logs
-  const recentLogs = db.prepare(`
-    SELECT request_id, session_id, provider, model, status, latency_ms, time_to_first_token_ms,
-           total_tokens, tokens_per_second, cost_estimate, pii_redacted, created_at
-    FROM logs ORDER BY created_at DESC LIMIT 20
-  `).all();
+  const recentLogs = s.recentLogs.all();
 
   // PII stats
-  const piiTotal = db.prepare(`SELECT COUNT(*) AS cnt FROM logs WHERE pii_redacted = 1`).get();
-  const piiRows = db.prepare(`SELECT pii_types_detected FROM logs WHERE pii_types_detected IS NOT NULL`).all();
+  const piiTotal = s.piiTotal.get();
+  const piiRows = s.piiTypes.all();
 
   const typesBreakdown = {};
   for (const row of piiRows) {
@@ -98,9 +111,9 @@ export function getMetrics(db) {
     } catch { /* skip malformed */ }
   }
 
-  // Provider breakdown (calls per provider)
+  // Provider breakdown
   const providerBreakdown = {};
-  const providerCalls = db.prepare(`SELECT provider, COUNT(*) as calls FROM logs WHERE provider IS NOT NULL GROUP BY provider`).all();
+  const providerCalls = s.providerCalls.all();
   for (const { provider, calls } of providerCalls) {
     providerBreakdown[provider] = { calls };
   }

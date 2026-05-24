@@ -44,6 +44,18 @@ spec:
                   name: ollive-secrets
                   key: openrouter-api-key
                   optional: true
+            - name: ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: ollive-secrets
+                  key: admin-token
+                  optional: false
+            - name: INGEST_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: ollive-secrets
+                  key: ingest-token
+                  optional: false
           resources:
             limits:
               cpu: "500m"

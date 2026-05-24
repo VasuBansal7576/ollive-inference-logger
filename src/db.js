@@ -2,17 +2,18 @@ import Database from 'better-sqlite3';
 import { mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { CONFIG } from './config.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = join(__dirname, '..', 'data');
-const DB_PATH = join(DATA_DIR, 'ollive.db');
+const DB_PATH = join(__dirname, '..', CONFIG.DB_PATH);
+const DATA_DIR = dirname(DB_PATH);
 
 mkdirSync(DATA_DIR, { recursive: true });
 
 const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
-db.pragma('busy_timeout = 5000');
+db.pragma(`busy_timeout = ${CONFIG.DB_BUSY_TIMEOUT}`);
 
 const MIGRATIONS = [
   {
@@ -164,11 +165,15 @@ export function getMessages(sessionId, limit = 20) {
   return stmts.getMessages.all(sessionId, limit);
 }
 
-export function insertLog(logData) {
+const insertLogTransaction = db.transaction((logData) => {
   stmts.insertLog.run(logData);
   if (logData.session_id && logData.total_tokens) {
     stmts.updateSessionTotals.run(logData.total_tokens || 0, logData.cost_estimate || 0, logData.session_id);
   }
+});
+
+export function insertLog(logData) {
+  insertLogTransaction(logData);
 }
 
 export function getRecentLogs(limit = 50) {

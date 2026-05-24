@@ -2,6 +2,7 @@ import { EventEmitter } from 'events';
 import { v4 as uuidv4 } from 'uuid';
 import * as openaiCompat from './providers/openai-compat.js';
 import * as gemini from './providers/gemini.js';
+import { CONFIG } from './config.js';
 
 // Pricing per 1M tokens (all free-tier for now)
 const PRICING = {
@@ -21,9 +22,9 @@ export class LLMSdk extends EventEmitter {
     this.providers = {};
 
     // 1. Groq
-    if (process.env.GROQ_API_KEY) {
+    if (CONFIG.GROQ_API_KEY) {
       this.providers.groq = {
-        apiKey: process.env.GROQ_API_KEY,
+        apiKey: CONFIG.GROQ_API_KEY,
         baseUrl: openaiCompat.PROVIDERS.groq.baseUrl,
         defaultModel: openaiCompat.PROVIDERS.groq.defaultModel,
         type: 'openai-compat',
@@ -37,9 +38,9 @@ export class LLMSdk extends EventEmitter {
     }
 
     // 2. Gemini
-    if (process.env.GEMINI_API_KEY) {
+    if (CONFIG.GEMINI_API_KEY) {
       this.providers.gemini = {
-        apiKey: process.env.GEMINI_API_KEY,
+        apiKey: CONFIG.GEMINI_API_KEY,
         defaultModel: gemini.DEFAULT_MODEL,
         type: 'gemini',
       };
@@ -52,9 +53,9 @@ export class LLMSdk extends EventEmitter {
     }
 
     // 3. OpenRouter
-    if (process.env.OPENROUTER_API_KEY) {
+    if (CONFIG.OPENROUTER_API_KEY) {
       this.providers.openrouter = {
-        apiKey: process.env.OPENROUTER_API_KEY,
+        apiKey: CONFIG.OPENROUTER_API_KEY,
         baseUrl: openaiCompat.PROVIDERS.openrouter.baseUrl,
         defaultModel: openaiCompat.PROVIDERS.openrouter.defaultModel,
         type: 'openai-compat',
@@ -141,12 +142,21 @@ export class LLMSdk extends EventEmitter {
     const tps = latencyMs > 0 ? (usage.output_tokens / (latencyMs / 1000)) : 0;
     const cost = estimateCost(provider, usage.input_tokens, usage.output_tokens);
 
+    const isCancelled = !!(
+      abortSignal?.aborted ||
+      (errorOccurred && (
+        errorOccurred.message?.toLowerCase().includes('abort') ||
+        errorOccurred.message?.toLowerCase().includes('cancel') ||
+        errorOccurred.name === 'AbortError'
+      ))
+    );
+
     const logEntry = {
       requestId,
       sessionId,
       provider,
       model: resolvedModel,
-      status: errorOccurred ? 'error' : 'success',
+      status: isCancelled ? 'cancelled' : (errorOccurred ? 'error' : 'success'),
       latencyMs,
       timeToFirstTokenMs: ttft,
       inputTokens: usage.input_tokens,
@@ -156,8 +166,8 @@ export class LLMSdk extends EventEmitter {
       costEstimate: cost,
       inputPreview,
       outputPreview: outputText.slice(0, 200),
-      errorMessage: errorOccurred?.message || null,
-      errorCode: errorOccurred ? 'STREAM_ERROR' : null,
+      errorMessage: isCancelled ? 'Request cancelled by user.' : (errorOccurred?.message || null),
+      errorCode: isCancelled ? 'USER_CANCELLED' : (errorOccurred ? 'STREAM_ERROR' : null),
     };
 
     this.emit('log', logEntry);

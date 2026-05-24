@@ -1,17 +1,41 @@
 import { redactAsync } from './redactor.js';
 import { getDb, insertLog } from './db.js';
+import { CONFIG } from './config.js';
 
 const VALID_STATUSES = new Set(['pending', 'streaming', 'success', 'error', 'cancelled']);
-const BATCH_SIZE = 20;
-const BATCH_INTERVAL_MS = 1000; // Flush logs every 1s
+const BATCH_SIZE = CONFIG.PIPELINE_BATCH_SIZE;
+const BATCH_INTERVAL_MS = CONFIG.PIPELINE_BATCH_INTERVAL_MS; // Flush logs every 1s
 
 let batchQueue = [];
 let flushTimeout = null;
 
+// Lazily cached prepared statements
+let insertStmtCached = null;
+let updateSessionTotalsCached = null;
+
+function getPreparedStatements() {
+  if (!insertStmtCached) {
+    const db = getDb();
+    insertStmtCached = db.prepare(`
+      INSERT INTO logs (session_id, request_id, provider, model, status, latency_ms, time_to_first_token_ms,
+        input_tokens, output_tokens, total_tokens, tokens_per_second, cost_estimate,
+        input_preview, output_preview, pii_types_detected, pii_redacted, error_message, error_code)
+      VALUES (@session_id, @request_id, @provider, @model, @status, @latency_ms, @time_to_first_token_ms,
+        @input_tokens, @output_tokens, @total_tokens, @tokens_per_second, @cost_estimate,
+        @input_preview, @output_preview, @pii_types_detected, @pii_redacted, @error_message, @error_code)
+    `);
+
+    updateSessionTotalsCached = db.prepare(`
+      UPDATE sessions SET total_tokens = total_tokens + ?, total_cost = total_cost + ?, updated_at = datetime('now') WHERE id = ?
+    `);
+  }
+  return { insertStmt: insertStmtCached, updateSessionTotals: updateSessionTotalsCached };
+}
+
 /**
  * Flush all buffered logs in a single SQLite transaction.
  */
-function flushBatch() {
+export function flushBatch() {
   if (flushTimeout) {
     clearTimeout(flushTimeout);
     flushTimeout = null;
@@ -23,18 +47,7 @@ function flushBatch() {
   batchQueue = [];
 
   const db = getDb();
-  const insertStmt = db.prepare(`
-    INSERT INTO logs (session_id, request_id, provider, model, status, latency_ms, time_to_first_token_ms,
-      input_tokens, output_tokens, total_tokens, tokens_per_second, cost_estimate,
-      input_preview, output_preview, pii_types_detected, pii_redacted, error_message, error_code)
-    VALUES (@session_id, @request_id, @provider, @model, @status, @latency_ms, @time_to_first_token_ms,
-      @input_tokens, @output_tokens, @total_tokens, @tokens_per_second, @cost_estimate,
-      @input_preview, @output_preview, @pii_types_detected, @pii_redacted, @error_message, @error_code)
-  `);
-
-  const updateSessionTotals = db.prepare(`
-    UPDATE sessions SET total_tokens = total_tokens + ?, total_cost = total_cost + ?, updated_at = datetime('now') WHERE id = ?
-  `);
+  const { insertStmt, updateSessionTotals } = getPreparedStatements();
 
   try {
     const batchTransaction = db.transaction((logs) => {
